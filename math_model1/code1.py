@@ -240,34 +240,35 @@ def z_test_mean(
 def linear_trend_test(y: np.ndarray, alpha: float = ALPHA_SLOPE):
     """
     检测线性趋势（线性系统误差）：
-      拟合 y(k) = a + b*k
-      检验斜率 b 的显著性 (p值 < alpha)
-      若显著，则去掉线性趋势 (y - (a + b*k))
+      - 拟合 y = a + b x
+      - 用斜率 b 的显著性检验判断是否存在趋势
+      - 若显著，只扣除“相对均值的线性漂移项” b*(x - mean(x))，从而保留原始均值
     """
     n = y.size
     if n <= 2:
         return False, 0.0, 0.0, y.copy()
+
     x = np.arange(1, n + 1)
     slope, intercept, _, p_value, _ = stats.linregress(x, y)
     has_trend = bool(p_value < alpha)
+
     if has_trend:
-        detrended = y - (intercept + slope * x)
+        # 仅去掉“相对均值的线性漂移”，保留 y 的均值
+        x_centered = x - np.mean(x)
+        trend_drift = slope * x_centered
+        detrended = y - trend_drift
+        # 现在：detrended 的均值 ≈ y 的均值（而非 0）
     else:
         detrended = y.copy()
+
     return has_trend, slope, intercept, detrended
+
 
 
 def detect_periodic(y: np.ndarray, ratio_thresh: float = PERIOD_ENERGY_RATIO):
     """
-    检测周期性系统误差：
-      1. 对序列去均值后做 FFT；
-      2. 找到能量最强的非零主频分量；
-      3. 若该频率的能量占总能量比例 > ratio_thresh(20%)，
-         认为存在显著周期项；
-      4. 用这个主频构造 sin / cos / 常数 的最小二乘拟合，
-         并从原序列中扣除 (得到去周期后的序列)。
-
-    这等价于“周期图检验 + 正弦拟合残差检验”的工程实现。
+    检测周期性系统误差 (已修正，保留均值)
+    ...
     """
     n = y.size
     if n == 0:
@@ -286,20 +287,56 @@ def detect_periodic(y: np.ndarray, ratio_thresh: float = PERIOD_ENERGY_RATIO):
     ratio = dom_power / total_power if total_power > 0 else 0.0
 
     has_period = ratio > ratio_thresh
-
     freq_arr = rfftfreq(n, d=1.0)
     f = freq_arr[dom_idx]
 
     if has_period and f != 0:
         k = np.arange(n)
-        design = np.column_stack([
+        
+        # ===== 开始修正逻辑 =====
+        
+        # 1. 设计矩阵 *只* 包含周期项
+        design_periodic = np.column_stack([
             np.sin(2 * np.pi * f * k),
-            np.cos(2 * np.pi * f * k),
+            np.cos(2 * np.pi * f * k)
+        ])
+        
+        # 2. 完整的拟合矩阵，包含均值项 (np.ones)
+        design_full = np.column_stack([
+            design_periodic,
             np.ones(n)
         ])
-        coef, *_ = np.linalg.lstsq(design, y, rcond=None)
-        fitted = design @ coef          # 周期项拟合
-        corrected = y - fitted          # 去周期
+        
+        # 3. 拟合完整模型 (A*sin + B*cos + C)
+        try:
+            # coef_full 将包含 [A, B, C]
+            coef_full, *_ = np.linalg.lstsq(design_full, y, rcond=None)
+        except np.linalg.LinAlgError:
+            # 如果拟合失败，放弃校正
+            return False, 0.0, np.zeros_like(y), y.copy()
+
+        # 4. 只提取周期项的系数 (A 和 B)
+        coef_periodic = coef_full[:2]
+        
+        # 5. 'fitted' 变量现在 *只* 代表周期波动部分 (A*sin + B*cos)
+        fitted = design_periodic @ coef_periodic
+        
+        # 6. 校正：从 y 中 *只* 减去周期波动
+        corrected = y - fitted
+        
+        # ===== 结束修正逻辑 =====
+        
+        # --- 旧的错误逻辑 ---
+        # design = np.column_stack([
+        #     np.sin(2 * np.pi * f * k),
+        #     np.cos(2 * np.pi * f * k),
+        #     np.ones(n)
+        # ])
+        # coef, *_ = np.linalg.lstsq(design, y, rcond=None)
+        # fitted = design @ coef      # 错误：fitted 包含了均值
+        # corrected = y - fitted    # 错误：导致均值归零
+        # --- 结束旧逻辑 ---
+
     else:
         fitted = np.zeros_like(y)
         corrected = y.copy()
@@ -662,7 +699,7 @@ def plot_means_stds(
 
     ax2 = ax1.twinx()
     ax2.set_ylabel("组标准差")
-    l2 = ax2.plot(groups, stds, marker="s", linestyle="--", label="各组标准差")
+    l2 = ax2.plot(groups, stds, marker="s", linestyle="--", label="各组标准差", color="#ff7f0e")
 
     lines = l1 + l2
     labels = [line.get_label() for line in lines]
