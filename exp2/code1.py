@@ -244,6 +244,7 @@ def harmonic_denoise_adaptive(y, t, K=HARM_K, f_min=FSCAN_MIN, f_max=FSCAN_MAX):
     y_clean = y - v_har
     return y_clean, v_har, f_best_sw
 
+
 # ===== 基带化与拟合 =====
 def hilbert_baseband(y, fs, f_guess, f_delta=F_DELTA_TARGET, edge_frac=EDGE_TRIM_FRAC):
     n = len(y); t = np.arange(n)/fs
@@ -344,54 +345,29 @@ def main():
     # === 组B：自适应扫频谐波去除 ===
     yB_clean, vhar, f0_power = harmonic_denoise_adaptive(yB, tB, K=HARM_K)
 
-    # === fig3：去谐波前后对比 ===
-    fig3 = plt.figure(figsize=(12,6))
-    bx1 = fig3.add_subplot(2,2,1); bx2 = fig3.add_subplot(2,2,2)
-    bx3 = fig3.add_subplot(2,2,3); bx4 = fig3.add_subplot(2,2,4)
-
-    # 时域
-    bx1.plot(tB, yB, label="原始")
-    bx1.plot(tB, yB_clean, label="去噪后")
-    bx1.set_title("B组：时域（去噪前 vs 去噪后）")
-    bx1.set_xlabel("时间（s）"); bx1.set_ylabel("幅度"); bx1.legend()
-
-    # 低频频谱（dB，共用y轴）
-    f_raw, m_raw_db = rfft_spectrum(yB, FS)
+    # (!!!) 修正：立即计算去噪后的频谱，以便后续 B 组拟合使用
     f_cln, m_cln_db = rfft_spectrum(yB_clean, FS)
-    bx2.plot(f_raw, m_raw_db, label="原始")
-    bx2.plot(f_cln, m_cln_db, label="去噪后")
-    bx2.set_xlim(0, 200)
-    ymax = max(np.max(m_raw_db), np.max(m_cln_db))
-    bx2.set_ylim(ymax-120, ymax)
-    bx2.set_title("B组：单边幅度谱（0–200 Hz）")
-    bx2.set_xlabel("频率（Hz）"); bx2.set_ylabel("幅度谱 (dB)")
-    max_n = int(200.0 // f0_power)
-    for n in range(1, max_n+1):
-        bx2.axvline(n*f0_power, color="gray", lw=0.8, ls=":", alpha=0.6)
-    bx2.legend()
-
-    # 拟合的工频谐波（时域）
-    bx3.plot(tB, vhar, lw=0.5)
-    bx3.set_title(f"拟合的工频谐波（f0={f0_power:.3f} Hz，K={HARM_K}）")
-    bx3.set_xlabel("时间（s）"); bx3.set_ylabel("幅度")
-
-    # 去噪后全频谱（dB）
-    bx4.plot(f_cln, m_cln_db)
-    bx4.set_xlim(0, 5000)
-    bx4.set_ylim(np.max(m_cln_db)-120, np.max(m_cln_db))
-    bx4.set_title("B组去噪后：单边幅度谱（全频）")
-    bx4.set_xlabel("频率（Hz）"); bx4.set_ylabel("幅度谱 (dB)")
-
-    fig3.tight_layout(); fig3.savefig(pjoin("fig3.png"), dpi=150); plt.close(fig3)
 
     # === A/B(clean)：希尔伯特→下变频→线性估计 ===
-    # A
-    fA_pk = float(fA[np.argmax(mA_db[(fA>=PEAK_SEARCH_FMIN)]) + np.where(fA>=PEAK_SEARCH_FMIN)[0][0]])
-    tA_trim, sA_bb, fT_A, _ = hilbert_baseband(yA, FS, fA_pk, f_delta=F_DELTA_TARGET, edge_frac=EDGE_TRIM_FRAC)
-    (A_A, T2_A, f0_A, phi_A), (sA_A, sT2_A, sf0_A, sphi_A) = linear_params_from_baseband(tA_trim, sA_bb, fT_A)
+    
+    # --- A 组 ---
+    fA_pk = float(fA[np.argmax(mA_db[(fA>=PEAK_SEARCH_FMIN)]) + np.where(fA>=PEAK_SEARCH_FMIN)[0][0]]) #
+    
+    # (!!!) 修复：确保 tA_trim 这一行存在
+    tA_trim, sA_bb, fT_A, _ = hilbert_baseband(yA, FS, fA_pk, f_delta=F_DELTA_TARGET, edge_frac=EDGE_TRIM_FRAC) #
+    
+    (A_A, T2_A, f0_A, phi_A), (sA_A, sT2_A, sf0_A, sphi_A) = linear_params_from_baseband(tA_trim, sA_bb, fT_A) #
 
-    # B (clean)
-    fB_pk = float(f_cln[np.argmax(m_cln_db[(f_cln>=PEAK_SEARCH_FMIN)]) + np.where(f_cln>=PEAK_SEARCH_FMIN)[0][0]])
+    # --- B 组 (Clean) ---
+    # (使用你添加的 robust_peak 函数)
+    def robust_peak(f, mag_db, fmin=PEAK_SEARCH_FMIN):
+        mask = (f >= fmin)
+        if np.any(mask):
+            idx0 = np.argmax(mag_db[mask])
+            return float(f[mask][idx0])
+        return float(f[np.argmax(mag_db)]) 
+
+    fB_pk = robust_peak(f_cln, m_cln_db, fmin=PEAK_SEARCH_FMIN)
     tB_trim, sB_bb, fT_B, _ = hilbert_baseband(yB_clean, FS, fB_pk, f_delta=F_DELTA_TARGET, edge_frac=EDGE_TRIM_FRAC)
     (A_B, T2_B, f0_B, phi_B), (sA_B, sT2_B, sf0_B, sphi_B) = linear_params_from_baseband(tB_trim, sB_bb, fT_B)
 
@@ -409,9 +385,50 @@ def main():
     axR.plot(tA_seg, (phi_A + 2*np.pi*(f0_A - fT_A)*tA_seg), '--', lw=FIT_LW, zorder=3, label="拟合")
     axR.set_title("A组：相位拟合"); axR.set_xlabel("时间（s）"); axR.set_ylabel("相位（rad）"); axR.legend()
 
+    # (!!!) 修正：只保存一次 fig2
     fig2.tight_layout(); fig2.savefig(pjoin("fig2.png"), dpi=150); plt.close(fig2)
 
+    # (!!!) 修正：这是 fig3 的正确位置
+    # === fig3：去谐波前后对比 + B组线性拟合 ===
+    fig3 = plt.figure(figsize=(12, 6))
+    ax1 = fig3.add_subplot(2, 2, 1); ax2 = fig3.add_subplot(2, 2, 2)
+    ax3 = fig3.add_subplot(2, 2, 3); ax4 = fig3.add_subplot(2, 2, 4)
+
+    # 子图1：时域对比
+    ax1.plot(tB, yB, label="原始")
+    ax1.plot(tB, yB_clean, label="去噪后")
+    ax1.set_title("B组：时域（去噪前 vs 去噪后）")
+    ax1.set_xlabel("时间（s）"); ax1.set_ylabel("幅度"); ax1.legend()
+
+    # 子图2：低频频谱对比
+    ax2.plot(fB0, mB0_db, label="原始")
+    ax2.plot(f_cln, m_cln_db, label="去噪后")
+    ax2.set_xlim(0, 200)
+    ymax = max(np.max(mB0_db), np.max(m_cln_db))
+    ax2.set_ylim(ymax-120, ymax)
+    ax2.set_title("B组：单边幅度谱（0–200 Hz）")
+    ax2.set_xlabel("频率（Hz）"); ax2.set_ylabel("幅度谱 (dB)")
+    max_n = int(200.0 // f0_power)
+    for n in range(1, max_n+1):
+        ax2.axvline(n*f0_power, color="gray", lw=0.8, ls=":", alpha=0.6)
+    ax2.legend()
+
+    # 子图3：B组对数幅度拟合 (这部分代码是正确的)
+    tB_seg, sB_seg = select_front_segment_by_amplitude(sB_bb, tB_trim, frac=AMP_FRONT_FRACTION)
+    ax3.plot(tB_trim, np.log(np.maximum(np.abs(sB_bb), 1e-16)), label="数据 (去噪后)")
+    ax3.plot(tB_seg, (np.log(A_B) - (1.0/T2_B)*tB_seg), '--', lw=FIT_LW, zorder=3, label="拟合")
+    ax3.set_title("B组去噪后：对数幅度拟合"); ax3.set_xlabel("时间（s）"); ax3.set_ylabel("ln|s_bb|"); ax3.legend()
+
+    # 子图4：B组相位拟合 (这部分代码也是正确的)
+    phB = np.unwrap(np.angle(sB_bb))
+    ax4.plot(tB_trim, phB, label="数据 (去噪后)")
+    ax4.plot(tB_seg, (phi_B + 2*np.pi*(f0_B - fT_B)*tB_seg), '--', lw=FIT_LW, zorder=3, label="拟合")
+    ax4.set_title("B组去噪后：相位拟合"); ax4.set_xlabel("时间（s）"); ax4.set_ylabel("相位（rad）"); ax4.legend()
+
+    fig3.tight_layout(); fig3.savefig(pjoin("fig3.png"), dpi=150); plt.close(fig3)
+
     # === 非线性复域拟合（A/B）===
+    # (!!!) 修正：只执行一次
     params_nl_A, _, _ = nonlinear_fit_from_linear_init(tA_trim, sA_bb, A_A, T2_A, f0_A, phi_A, fT_A)
     params_nl_B, _, _ = nonlinear_fit_from_linear_init(tB_trim, sB_bb, A_B, T2_B, f0_B, phi_B, fT_B)
     A_A_nl, T2_A_nl, f0_A_nl, phi_A_nl = params_nl_A
@@ -435,11 +452,11 @@ def main():
 
     c3.plot(tB_trim, np.real(sB_bb), label="数据")
     c3.plot(tB_trim, np.real(gB), '--', lw=FIT_LW, zorder=3, label="拟合")
-    c3.set_title("B组：实部（数据 vs 拟合）"); c3.set_xlabel("时间（s）"); c3.set_ylabel("实部"); c3.legend()
+    c3.set_title("B组：实部（数据 vs N拟合）"); c3.set_xlabel("时间（s）"); c3.set_ylabel("实部"); c3.legend()
 
     c4.plot(tB_trim, np.imag(sB_bb), label="数据")
     c4.plot(tB_trim, np.imag(gB), '--', lw=FIT_LW, zorder=3, label="拟合")
-    c4.set_title("B组：虚部（数据 vs 拟合）"); c4.set_xlabel("时间（s）"); c4.set_ylabel("虚部"); c4.legend()
+    c4.set_title("B组：虚部（数据 vs N拟合）"); c4.set_xlabel("时间（s）"); c4.set_ylabel("虚部"); c4.legend()
 
     fig4.tight_layout(); fig4.savefig(pjoin("fig4.png"), dpi=150); plt.close(fig4)
 
@@ -504,3 +521,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
