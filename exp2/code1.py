@@ -9,6 +9,7 @@ NMR 信号处理与参数估计（自适应扫频版，纯 NumPy/Scipy，无 pan
 1) 频谱：使用 rFFT 单边幅度谱（dB），不使用窗函数/PSD/Welch，符合“不得引入实验书外步骤”。
 2) 组B谐波：采用自适应扫频（黄金分割 + 可选抛物线精修）锁定工频基频，再在全量数据+目标K做一次拟合后相减。
 3) 组A/组B(clean)：希尔伯特→下变频→两次线性拟合；并以其为初值做一次非线性复域拟合。
+4) 步骤3绘图要求：fig3 左上为“去噪前 vs 去噪后”时域，并**叠加指数包络 ±A·e^{-t/T2}**；右上为(0–200 Hz) 频谱对比；左下为 ln|s_bb| 直线拟合；右下为相位展开直线拟合。
 """
 
 import re
@@ -39,7 +40,7 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 def pjoin(name: str) -> str: return str(OUTPUT_DIR / name)
 
 # ===== 实验参数 =====
-FS = 100_000.0           # 采样率（你已确认 100 kHz）
+FS = 100_000.0           # 采样率（必要时修改为数据真实采样率）
 EDGE_TRIM_FRAC = 0.01    # 希尔伯特后两端丢弃比例
 AMP_FRONT_FRACTION = 0.5 # 线性回归使用前段幅度≥50%区域
 USE_WLS = True           # 线性回归使用加权
@@ -107,6 +108,7 @@ def load_signal(path_like, fs=FS):
 
 # ===== 频谱（dB，无窗）=====
 DB_EPS = 1e-20
+
 def rfft_spectrum(y, fs):
     n = len(y)
     Y = np.fft.rfft(y)
@@ -115,6 +117,7 @@ def rfft_spectrum(y, fs):
     mag_db = 20.0 * np.log10(mag + DB_EPS)
     return f, mag_db
 
+# （仅 fig1 使用的辅助标注；与步骤3无关）
 def annotate_peak_and_noise(ax, f, mag_db, fmin=PEAK_SEARCH_FMIN, exclude_hz=NOISE_EXCLUDE_HZ, label=None):
     f = np.asarray(f); mag_db = np.asarray(mag_db)
     mask = (f >= fmin)
@@ -144,12 +147,14 @@ def build_design_matrix(f_base, t, K, include_dc=True):
         A = np.hstack([cos_block, sin_block])
     return A
 
+
 def ls_solve(A, y):
     theta, residuals, rank, s = np.linalg.lstsq(A, y, rcond=None)
     rss = float(residuals[0]) if residuals.size > 0 else float(np.sum((y - A @ theta)**2))
     return theta, rss
 
 # —— 自适应扫频小工具 ——
+
 def prepare_for_sweep(t, y, decim=SWEEP_DECIM, maxlen=SWEEP_MAXLEN):
     if decim > 1:
         t_ds = t[::decim]; y_ds = y[::decim]
@@ -162,10 +167,12 @@ def prepare_for_sweep(t, y, decim=SWEEP_DECIM, maxlen=SWEEP_MAXLEN):
         t_ds = t_ds[start:stop]; y_ds = y_ds[start:stop]
     return t_ds, y_ds
 
+
 def rss_at_freq(ftest, t_vec, y_vec, K, include_dc=True):
     A = build_design_matrix(ftest, t_vec, K, include_dc=include_dc)
     _, rss = ls_solve(A, y_vec)
     return float(rss)
+
 
 def golden_section_minimize(f, a, b, tol=GOLD_TOL, max_eval=GOLD_MAX_EVAL):
     phi = (1 + np.sqrt(5)) / 2.0
@@ -189,6 +196,7 @@ def golden_section_minimize(f, a, b, tol=GOLD_TOL, max_eval=GOLD_MAX_EVAL):
     x_best, f_best = (x1, f1) if f1 < f2 else (x2, f2)
     return x_best, f_best, evals
 
+
 def parabolic_refine(evals):
     if len(evals) < 3: return None
     pts = sorted(evals, key=lambda p: p[1])[:3]
@@ -201,6 +209,7 @@ def parabolic_refine(evals):
     if abs(A) < 1e-20: return None
     x0 = -B / (2*A)
     return x0
+
 
 def harmonic_denoise_adaptive(y, t, K=HARM_K, f_min=FSCAN_MIN, f_max=FSCAN_MAX):
     # 1) 频谱种子
@@ -229,7 +238,7 @@ def harmonic_denoise_adaptive(y, t, K=HARM_K, f_min=FSCAN_MIN, f_max=FSCAN_MAX):
     # 3) 黄金分割找最小 RSS
     f_best_sw, rss_best_sw, evals = golden_section_minimize(rss_f, a, b, tol=GOLD_TOL, max_eval=GOLD_MAX_EVAL)
 
-    # 4) 抛物线精修
+    # 4) 可选抛物线精修
     if PARABOLIC_REFINE:
         x0 = parabolic_refine(evals)
         if x0 is not None and (a <= x0 <= b):
@@ -242,10 +251,15 @@ def harmonic_denoise_adaptive(y, t, K=HARM_K, f_min=FSCAN_MIN, f_max=FSCAN_MAX):
     theta_best, _ = ls_solve(A_best_full, y)
     v_har = A_best_full @ theta_best
     y_clean = y - v_har
+
+    # 自检（可选）：能量守恒
+    # assert np.allclose(y, v_har + y_clean, atol=1e-8)
+
     return y_clean, v_har, f_best_sw
 
 
 # ===== 基带化与拟合 =====
+
 def hilbert_baseband(y, fs, f_guess, f_delta=F_DELTA_TARGET, edge_frac=EDGE_TRIM_FRAC):
     n = len(y); t = np.arange(n)/fs
     z = hilbert(y)
@@ -255,12 +269,14 @@ def hilbert_baseband(y, fs, f_guess, f_delta=F_DELTA_TARGET, edge_frac=EDGE_TRIM
     sl = slice(cut, n-cut) if cut > 0 else slice(0, n)
     return t[sl], s_bb[sl], f_T, sl
 
+
 def select_front_segment_by_amplitude(s_bb, t, frac=AMP_FRONT_FRACTION):
     amp = np.abs(s_bb); peak = np.max(amp); thresh = frac * peak
     idx = np.where(amp >= thresh)[0]
     if len(idx) == 0:
         k = max(1, int(0.3 * len(amp))); return t[:k], s_bb[:k]
     end = idx[-1] + 1; return t[:end], s_bb[:end]
+
 
 def wls_fit_line(x, y, w=None):
     x = np.asarray(x).reshape(-1,1); y = np.asarray(y).reshape(-1,1); n = len(x)
@@ -275,6 +291,7 @@ def wls_fit_line(x, y, w=None):
     sb = float(np.sqrt(cov[0,0])); sm = float(np.sqrt(cov[1,1]))
     b = float(beta[0,0]); m = float(beta[1,0])
     return m, b, sm, sb, rss
+
 
 def linear_params_from_baseband(t, s_bb, f_T, use_wls=USE_WLS):
     t_lin, s_lin = select_front_segment_by_amplitude(s_bb, t, frac=AMP_FRONT_FRACTION)
@@ -292,12 +309,15 @@ def linear_params_from_baseband(t, s_bb, f_T, use_wls=USE_WLS):
     sigma_f0 = sm2/(2*np.pi); sigma_phi = sb2
     return (A, T2, f0, phi), (sigma_A, sigma_T2, sigma_f0, sigma_phi)
 
+
 def complex_model(t, A, T2, df, phi):
     return A * np.exp(-t/T2) * np.exp(1j*(2*np.pi*df*t + phi))
+
 
 def stacked_model(t, A, T2, df, phi):
     g = complex_model(t, A, T2, df, phi)
     return np.hstack([np.real(g), np.imag(g)])
+
 
 def nonlinear_fit_from_linear_init(t, s_bb, A0, T20, f0, phi0, f_T):
     y_stack = np.hstack([np.real(s_bb), np.imag(s_bb)])
@@ -311,7 +331,18 @@ def nonlinear_fit_from_linear_init(t, s_bb, A0, T20, f0, phi0, f_T):
     f0_nl = df + f_T
     return (A, T2, f0_nl, phi), popt, pcov
 
+# ===== 频谱峰值（稳健） =====
+
+def robust_peak(f, mag_db, fmin=PEAK_SEARCH_FMIN):
+    f = np.asarray(f); mag_db = np.asarray(mag_db)
+    mask = (f >= fmin)
+    if np.any(mask):
+        idx0 = np.argmax(mag_db[mask])
+        return float(f[mask][idx0])
+    return float(f[np.argmax(mag_db)])
+
 # ===== 主流程 =====
+
 def main():
     print("脚本目录 =", SCRIPT_DIR)
     print("输出目录 =", OUTPUT_DIR)
@@ -345,28 +376,16 @@ def main():
     # === 组B：自适应扫频谐波去除 ===
     yB_clean, vhar, f0_power = harmonic_denoise_adaptive(yB, tB, K=HARM_K)
 
-    # (!!!) 修正：立即计算去噪后的频谱，以便后续 B 组拟合使用
+    # 去噪后频谱（用于 fig3 对比与峰值估计）
     f_cln, m_cln_db = rfft_spectrum(yB_clean, FS)
 
     # === A/B(clean)：希尔伯特→下变频→线性估计 ===
-    
-    # --- A 组 ---
-    fA_pk = float(fA[np.argmax(mA_db[(fA>=PEAK_SEARCH_FMIN)]) + np.where(fA>=PEAK_SEARCH_FMIN)[0][0]]) #
-    
-    # (!!!) 修复：确保 tA_trim 这一行存在
-    tA_trim, sA_bb, fT_A, _ = hilbert_baseband(yA, FS, fA_pk, f_delta=F_DELTA_TARGET, edge_frac=EDGE_TRIM_FRAC) #
-    
-    (A_A, T2_A, f0_A, phi_A), (sA_A, sT2_A, sf0_A, sphi_A) = linear_params_from_baseband(tA_trim, sA_bb, fT_A) #
+    # A 组峰值（稳健）
+    fA_pk = robust_peak(fA, mA_db, fmin=PEAK_SEARCH_FMIN)
+    tA_trim, sA_bb, fT_A, _ = hilbert_baseband(yA, FS, fA_pk, f_delta=F_DELTA_TARGET, edge_frac=EDGE_TRIM_FRAC)
+    (A_A, T2_A, f0_A, phi_A), (sA_A, sT2_A, sf0_A, sphi_A) = linear_params_from_baseband(tA_trim, sA_bb, fT_A)
 
-    # --- B 组 (Clean) ---
-    # (使用你添加的 robust_peak 函数)
-    def robust_peak(f, mag_db, fmin=PEAK_SEARCH_FMIN):
-        mask = (f >= fmin)
-        if np.any(mask):
-            idx0 = np.argmax(mag_db[mask])
-            return float(f[mask][idx0])
-        return float(f[np.argmax(mag_db)]) 
-
+    # B 组（clean）峰值（稳健）
     fB_pk = robust_peak(f_cln, m_cln_db, fmin=PEAK_SEARCH_FMIN)
     tB_trim, sB_bb, fT_B, _ = hilbert_baseband(yB_clean, FS, fB_pk, f_delta=F_DELTA_TARGET, edge_frac=EDGE_TRIM_FRAC)
     (A_B, T2_B, f0_B, phi_B), (sA_B, sT2_B, sf0_B, sphi_B) = linear_params_from_baseband(tB_trim, sB_bb, fT_B)
@@ -385,50 +404,52 @@ def main():
     axR.plot(tA_seg, (phi_A + 2*np.pi*(f0_A - fT_A)*tA_seg), '--', lw=FIT_LW, zorder=3, label="拟合")
     axR.set_title("A组：相位拟合"); axR.set_xlabel("时间（s）"); axR.set_ylabel("相位（rad）"); axR.legend()
 
-    # (!!!) 修正：只保存一次 fig2
     fig2.tight_layout(); fig2.savefig(pjoin("fig2.png"), dpi=150); plt.close(fig2)
 
-    # (!!!) 修正：这是 fig3 的正确位置
     # === fig3：去谐波前后对比 + B组线性拟合 ===
     fig3 = plt.figure(figsize=(12, 6))
-    ax1 = fig3.add_subplot(2, 2, 1); ax2 = fig3.add_subplot(2, 2, 2)
-    ax3 = fig3.add_subplot(2, 2, 3); ax4 = fig3.add_subplot(2, 2, 4)
+    g1 = fig3.add_subplot(2, 2, 1); g2 = fig3.add_subplot(2, 2, 2)
+    g3 = fig3.add_subplot(2, 2, 3); g4 = fig3.add_subplot(2, 2, 4)
 
-    # 子图1：时域对比
-    ax1.plot(tB, yB, label="原始")
-    ax1.plot(tB, yB_clean, label="去噪后")
-    ax1.set_title("B组：时域（去噪前 vs 去噪后）")
-    ax1.set_xlabel("时间（s）"); ax1.set_ylabel("幅度"); ax1.legend()
+    # 子图1：时域对比 + 指数包络（按步骤3要求）
+    g1.plot(tB, yB, label="原始")
+    g1.plot(tB, yB_clean, label="去噪后")
+    # 叠加指数包络（与线性估计一致，使用 tB_trim 坐标）
+    env_B = A_B * np.exp(-tB_trim / T2_B)
+    g1.plot(tB_trim,  env_B, '--', lw=1.2, label='包络  +A·e^{-t/T2}')
+    g1.plot(tB_trim, -env_B, '--', lw=1.2, label='包络  -A·e^{-t/T2}')
+    g1.set_title("B组：时域（去噪前 vs 去噪后 + 包络）")
+    g1.set_xlabel("时间（s）"); g1.set_ylabel("幅度"); g1.legend()
 
-    # 子图2：低频频谱对比
-    ax2.plot(fB0, mB0_db, label="原始")
-    ax2.plot(f_cln, m_cln_db, label="去噪后")
-    ax2.set_xlim(0, 200)
+    # 子图2：低频频谱对比（0–200 Hz）
+    g2.plot(fB0, mB0_db, label="原始")
+    g2.plot(f_cln, m_cln_db, label="去噪后")
+    g2.set_xlim(0, 200)
     ymax = max(np.max(mB0_db), np.max(m_cln_db))
-    ax2.set_ylim(ymax-120, ymax)
-    ax2.set_title("B组：单边幅度谱（0–200 Hz）")
-    ax2.set_xlabel("频率（Hz）"); ax2.set_ylabel("幅度谱 (dB)")
+    g2.set_ylim(ymax-120, ymax)
+    g2.set_title("B组：单边幅度谱（0–200 Hz）")
+    g2.set_xlabel("频率（Hz）"); g2.set_ylabel("幅度谱 (dB)")
+    # 标注谐波位置
     max_n = int(200.0 // f0_power)
     for n in range(1, max_n+1):
-        ax2.axvline(n*f0_power, color="gray", lw=0.8, ls=":", alpha=0.6)
-    ax2.legend()
+        g2.axvline(n*f0_power, color="gray", lw=0.8, ls=":", alpha=0.6)
+    g2.legend()
 
-    # 子图3：B组对数幅度拟合 (这部分代码是正确的)
+    # 子图3：B组（去噪后）对数幅度直线拟合
     tB_seg, sB_seg = select_front_segment_by_amplitude(sB_bb, tB_trim, frac=AMP_FRONT_FRACTION)
-    ax3.plot(tB_trim, np.log(np.maximum(np.abs(sB_bb), 1e-16)), label="数据 (去噪后)")
-    ax3.plot(tB_seg, (np.log(A_B) - (1.0/T2_B)*tB_seg), '--', lw=FIT_LW, zorder=3, label="拟合")
-    ax3.set_title("B组去噪后：对数幅度拟合"); ax3.set_xlabel("时间（s）"); ax3.set_ylabel("ln|s_bb|"); ax3.legend()
+    g3.plot(tB_trim, np.log(np.maximum(np.abs(sB_bb), 1e-16)), label="数据 (去噪后)")
+    g3.plot(tB_seg, (np.log(A_B) - (1.0/T2_B)*tB_seg), '--', lw=FIT_LW, zorder=3, label="拟合")
+    g3.set_title("B组去噪后：对数幅度拟合"); g3.set_xlabel("时间（s）"); g3.set_ylabel("ln|s_bb|"); g3.legend()
 
-    # 子图4：B组相位拟合 (这部分代码也是正确的)
+    # 子图4：B组（去噪后）相位直线拟合
     phB = np.unwrap(np.angle(sB_bb))
-    ax4.plot(tB_trim, phB, label="数据 (去噪后)")
-    ax4.plot(tB_seg, (phi_B + 2*np.pi*(f0_B - fT_B)*tB_seg), '--', lw=FIT_LW, zorder=3, label="拟合")
-    ax4.set_title("B组去噪后：相位拟合"); ax4.set_xlabel("时间（s）"); ax4.set_ylabel("相位（rad）"); ax4.legend()
+    g4.plot(tB_trim, phB, label="数据 (去噪后)")
+    g4.plot(tB_seg, (phi_B + 2*np.pi*(f0_B - fT_B)*tB_seg), '--', lw=FIT_LW, zorder=3, label="拟合")
+    g4.set_title("B组去噪后：相位拟合"); g4.set_xlabel("时间（s）"); g4.set_ylabel("相位（rad）"); g4.legend()
 
     fig3.tight_layout(); fig3.savefig(pjoin("fig3.png"), dpi=150); plt.close(fig3)
 
     # === 非线性复域拟合（A/B）===
-    # (!!!) 修正：只执行一次
     params_nl_A, _, _ = nonlinear_fit_from_linear_init(tA_trim, sA_bb, A_A, T2_A, f0_A, phi_A, fT_A)
     params_nl_B, _, _ = nonlinear_fit_from_linear_init(tB_trim, sB_bb, A_B, T2_B, f0_B, phi_B, fT_B)
     A_A_nl, T2_A_nl, f0_A_nl, phi_A_nl = params_nl_A
@@ -452,18 +473,18 @@ def main():
 
     c3.plot(tB_trim, np.real(sB_bb), label="数据")
     c3.plot(tB_trim, np.real(gB), '--', lw=FIT_LW, zorder=3, label="拟合")
-    c3.set_title("B组：实部（数据 vs N拟合）"); c3.set_xlabel("时间（s）"); c3.set_ylabel("实部"); c3.legend()
+    c3.set_title("B组：实部（数据 vs 拟合）"); c3.set_xlabel("时间（s）"); c3.set_ylabel("实部"); c3.legend()
 
     c4.plot(tB_trim, np.imag(sB_bb), label="数据")
     c4.plot(tB_trim, np.imag(gB), '--', lw=FIT_LW, zorder=3, label="拟合")
-    c4.set_title("B组：虚部（数据 vs N拟合）"); c4.set_xlabel("时间（s）"); c4.set_ylabel("虚部"); c4.legend()
+    c4.set_title("B组：虚部（数据 vs 拟合）"); c4.set_xlabel("时间（s）"); c4.set_ylabel("虚部"); c4.legend()
 
     fig4.tight_layout(); fig4.savefig(pjoin("fig4.png"), dpi=150); plt.close(fig4)
 
     # === 统计与 results.txt ===
-    sum_raw2  = float(np.sum(yB**2))
+    sum_raw2   = float(np.sum(yB**2))
     sum_clean2 = float(np.sum(yB_clean**2))
-    sum_har2  = float(np.sum(vhar**2))
+    sum_har2   = float(np.sum(vhar**2))
     explained_pct = 100.0 * (sum_har2 / (sum_raw2 + 1e-12))
     reduction_pct = 100.0 * (1.0 - (sum_clean2 / (sum_raw2 + 1e-12)))
 
@@ -521,4 +542,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
