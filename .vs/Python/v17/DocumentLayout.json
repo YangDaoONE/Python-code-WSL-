@@ -14,8 +14,12 @@
       "DocumentGroups": [
         {
           "DockedWidth": 200,
-          "SelectedChildIndex": 0,
+          "SelectedChildIndex": 1,
           "Children": [
+            {
+              "$type": "Bookmark",
+              "Name": "ST:0:0:{aa2115a1-9712-457b-9047-dbb71ca2cdd2}"
+            },
             {
               "$type": "Document",
               "DocumentIndex": 0,
@@ -24,8 +28,8 @@
               "RelativeDocumentMoniker": "exp2\\code1.py",
               "ToolTip": "C:\\Users\\YangDaoONE\\Desktop\\Project\\code\\Python\\exp2\\code1.py",
               "RelativeToolTip": "exp2\\code1.py",
-              "ViewState": "AQIAAAAAAAAAAAAAAADwvwsAAAADAAAA",
-              "Icon": "00000000-0000-0000-0000-000000000000.000000|iVBORw0KGgoAAAANSUhEUgAAABQAAAAUCAYAAACNiR0NAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAANGSURBVDhPrZTLU5xVEMV/fe/3GGaGGQIIiFpWJSrioyopdRFJWXHhK\u002BXWRf5Gt1o\u002B2CRlUho2oQJSGsKkrAjCMIQZvhnme952MWECQ5Y5yz63z723\u002B3TDy4SqymjMGGy9XqoC57gRaKcTd52jOB0cJvm\u002BuRD49gMRWSqVvBnAnHCqOjgsZ\u002B5wcZzvqerdLC/W09S1OREsg/hj/mdeyf9O4IbCJKigCCKIMaCAuoG4iAIqcKDCj3Gcfd87zu4AagFeMRJ6vr3prLmJ8KaiIUpoRIIgCINqtRL4fhAUzgVOXaCqIRAicgGYK5y28sLdU6WwALYW1tS334JcVSHQwiEi1OoTzM/P89rrb1AplxFjyIucPM1QdWAMAtbzzMMwtHfjOI8tQFjyysaYz1X1irE2mJqaZnFxkUtvvc3s7BzVagXfD6nX60xOTjFeq\u002BGckiYJqKZizCpwu9/PY\u002B9ZgYfV9qxldu5VPvr4ExbefY/pqWlEhCRJUFWSJOHJk39Y/vUXNv5cJykS7Eny6U4OA8ZQqVQIwxL1\u002BgQXL17i6qdLfP3NDb748iuWlq7xzsIC5XIZMcKg/89hAUqDL18HLnueF0zU6zw9fMr29r\u002B0222qlSq1Wo0k7tNobLLyx\u002B\u002BsrNwjio5QdamIrCp6q9/P43Mv5JnfrLFEUcTGxjrLyz/TaDxiv9lkc/Mha2troylDvFDQ8zwqlQq1ep1yuYJzDlc4mvtNWq0DnHMEQQhnjQ7nBBWcc/R6PRAolUqMjY3heR5pmvDf7i6dow7WWvI8B9WB4U/hRHAYzouC/f19ms0mncND4jimKAparX0eNxpsb2/Tbrc56nQoCndu4C3AWMkrGZHrInJZVYPjbpe9vSZRFGGMYXx8nE6nw\u002BrqfR48WKWxtUWvF4EIIpIC91X11tDYk5lTY\u002BSKs\u002BZ9gRpGUFX6/R6tgxY7Ozv8/dcGja1HdDpt1LkTMYC9JM1/63bT28PRKxTnfCPGNz4iMyJiUHJVl2VZnh33jrMoirI4iTPnXCZIJiIJsIvwQ54XP6Vp8ZjR9eX79kMjci0MvRl0sDh0ZH09r5kUSZrvOdU7\u002BWB9HZ4RPIExeNVqOP4ibgTa7SaRc\u002BSjxEvF/ySgnpiuzw9DAAAAAElFTkSuQmCC",
+              "ViewState": "AQIAAAAAAAAAAAAAAADwvwUAAAAvAAAA",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.001001|",
               "WhenOpened": "2025-11-07T09:56:46.253Z",
               "EditorCaption": ""
             }

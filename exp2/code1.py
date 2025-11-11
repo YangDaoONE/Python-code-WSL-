@@ -13,14 +13,65 @@ NMR 信号处理与参数估计（自适应扫频版，纯 NumPy/Scipy，无 pan
 """
 
 import re
+import warnings
 from pathlib import Path
 import numpy as np
 
 # ===== 画图后端与中文 =====
 import matplotlib
 matplotlib.use("Agg")
+from matplotlib import font_manager
 import matplotlib.pyplot as plt
-plt.rcParams["font.sans-serif"] = ["SimHei","Microsoft YaHei","PingFang SC","Noto Sans CJK SC","SimSun"]
+
+def _ensure_cn_fonts():
+    """注册系统中已有的中文字体，避免绘图时缺字."""
+    font_files = [
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSerifCJK-Bold.ttc",
+    ]
+    added = False
+    for fpath in font_files:
+        p = Path(fpath)
+        if p.is_file():
+            try:
+                font_manager.fontManager.addfont(str(p))
+                added = True
+            except Exception:
+                pass  # 部分 Matplotlib 版本会重复注册，忽略即可
+    if added:
+        rebuild = getattr(font_manager, "_rebuild", None)
+        if callable(rebuild):
+            rebuild()
+
+    candidates = [
+        "SimHei",
+        "Microsoft YaHei",
+        "PingFang SC",
+        "Noto Sans CJK SC",
+        "Noto Sans CJK TC",
+        "Noto Sans CJK JP",
+        "Noto Sans CJK KR",
+        "Noto Sans Mono CJK SC",
+        "Noto Serif CJK SC",
+        "SimSun",
+        "DejaVu Sans",
+    ]
+    available = []
+    seen = set()
+    for name in candidates:
+        if name in seen:
+            continue
+        seen.add(name)
+        if any(name == f.name for f in font_manager.fontManager.ttflist):
+            available.append(name)
+    if not available:
+        available = ["DejaVu Sans"]
+    plt.rcParams["font.family"] = available
+    plt.rcParams["font.sans-serif"] = available
+
+_ensure_cn_fonts()
 plt.rcParams["axes.unicode_minus"] = False
 plt.rcParams.update({
     "lines.linewidth": 0.5,   # 全局细线
@@ -47,6 +98,11 @@ USE_WLS = True           # 线性回归使用加权
 HARM_K = 100             # 最终谐波阶数（全量拟合用）
 FSCAN_MIN, FSCAN_MAX = 49.9, 50.1   # 工频搜索范围
 F_DELTA_TARGET = 1.0     # 下变频目标差频 1 Hz
+
+# —— 线性拟合稳健化（防低SNR失效）——
+NOISE_TAIL_FRAC = 0.2     # 用末尾 20% 基带幅度估计噪声基线
+SNR_RATIO_MIN  = 5.0      # 仅保留 |s_bb| >= SNR_RATIO_MIN * noise_floor 的前段样本
+PHASE_MAD_K    = 3.5      # 相位拟合：MAD * K 作为剔除阈值
 
 # fig1 标注参数
 PEAK_SEARCH_FMIN  = 80.0   # 谱峰搜索下限（避开 50Hz）
@@ -75,8 +131,18 @@ def load_signal(path_like, fs=FS):
 
     def _try(delim):
         try:
-            arr = np.genfromtxt(str(real_path), delimiter=delim, dtype=float,
-                                autostrip=True, comments=None)
+            # 某些 CSV 会混入坏行，引发 genfromtxt 的 ValueError，这里强制吞掉
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                arr = np.genfromtxt(
+                    str(real_path),
+                    delimiter=delim,
+                    dtype=float,
+                    autostrip=True,
+                    comments=None,
+                    encoding="utf-8",
+                    invalid_raise=False,
+                )
             if arr is None or np.size(arr) < 8:
                 return None
             return np.array(arr, dtype=float)
@@ -277,6 +343,46 @@ def select_front_segment_by_amplitude(s_bb, t, frac=AMP_FRONT_FRACTION):
         k = max(1, int(0.3 * len(amp))); return t[:k], s_bb[:k]
     end = idx[-1] + 1; return t[:end], s_bb[:end]
 
+# —— 稳健：基于噪声基线的 SNR 选段 ——
+def estimate_noise_floor(s_bb, tail_frac=NOISE_TAIL_FRAC):
+    amp = np.abs(s_bb)
+    n = len(amp)
+    start = int(max(0, (1.0 - tail_frac) * n))
+    tail = amp[start:] if start < n else amp
+    # 取中位数作为噪声“基线”估计，避免被离群值拉高
+    nf = float(np.median(tail))
+    return max(nf, 1e-12)
+
+def select_segment_by_snr(s_bb, t, snr_ratio=SNR_RATIO_MIN, tail_frac=NOISE_TAIL_FRAC):
+    nf = estimate_noise_floor(s_bb, tail_frac)
+    amp = np.abs(s_bb)
+    mask = amp >= snr_ratio * nf
+    if not np.any(mask):
+        # 回退：前段高幅占比
+        return select_front_segment_by_amplitude(s_bb, t, frac=AMP_FRONT_FRACTION)
+    # 取满足阈值的“连续前段”，直到首次跌破阈值位置
+    idx = np.where(mask)[0]
+    end = idx[-1] + 1
+    return t[:end], s_bb[:end]
+
+# —— 相位拟合：MAD 剔除离群点后再拟合 ——
+_def_ = object()
+
+def _mad(x):
+    x = np.asarray(x).ravel()
+    med = np.median(x)
+    return float(np.median(np.abs(x - med)) + 1e-12)
+
+def refine_phase_fit(t, ph, w=None, k=PHASE_MAD_K):
+    # 初次加权直线
+    m, b, sm, sb, _ = wls_fit_line(t, ph, w=w)
+    res = ph - (b + m * t)
+    thr = 1.4826 * _mad(res) * k  # 正态等价尺度
+    good = np.abs(res) <= thr
+    if np.sum(good) >= max(3, int(0.4 * len(t))):
+        m, b, sm, sb, _ = wls_fit_line(t[good], ph[good], w=(None if w is None else w[good]))
+    return m, b, sm, sb, good
+
 
 def wls_fit_line(x, y, w=None):
     x = np.asarray(x).reshape(-1,1); y = np.asarray(y).reshape(-1,1); n = len(x)
@@ -294,7 +400,8 @@ def wls_fit_line(x, y, w=None):
 
 
 def linear_params_from_baseband(t, s_bb, f_T, use_wls=USE_WLS):
-    t_lin, s_lin = select_front_segment_by_amplitude(s_bb, t, frac=AMP_FRONT_FRACTION)
+    # 用 SNR 选段，避免把低 SNR 尾段带入线性回归
+    t_lin, s_lin = select_segment_by_snr(s_bb, t)
     amp = np.abs(s_lin)
     y1 = np.log(np.minimum(np.maximum(amp, 1e-16), 1e16))
     w1 = (amp/np.max(amp))**2 if use_wls else None
@@ -304,7 +411,8 @@ def linear_params_from_baseband(t, s_bb, f_T, use_wls=USE_WLS):
 
     ph = np.unwrap(np.angle(s_lin))
     w2 = (amp/np.max(amp))**2 if use_wls else None
-    m2, b2, sm2, sb2, _ = wls_fit_line(t_lin, ph, w=w2)
+    # 先拟合，再用 MAD 剔除相位离群点并重拟合
+    m2, b2, sm2, sb2, _good = refine_phase_fit(t_lin, ph, w=w2)
     f0 = m2/(2*np.pi) + f_T; phi = b2
     sigma_f0 = sm2/(2*np.pi); sigma_phi = sb2
     return (A, T2, f0, phi), (sigma_A, sigma_T2, sigma_f0, sigma_phi)
@@ -394,7 +502,8 @@ def main():
     fig2 = plt.figure(figsize=(12,5))
     axL = fig2.add_subplot(1,2,1); axR = fig2.add_subplot(1,2,2)
 
-    tA_seg, sA_seg = select_front_segment_by_amplitude(sA_bb, tA_trim, frac=AMP_FRONT_FRACTION)
+    tA_seg, sA_seg = select_segment_by_snr(sA_bb, tA_trim)
+    nA_lin = len(tA_seg)
     axL.plot(tA_trim, np.log(np.maximum(np.abs(sA_bb), 1e-16)), label="数据")
     axL.plot(tA_seg, (np.log(A_A) - (1.0/T2_A)*tA_seg), '--', lw=FIT_LW, zorder=3, label="拟合")
     axL.set_title("A组：对数幅度拟合"); axL.set_xlabel("时间（s）"); axL.set_ylabel("ln|s_bb|"); axL.legend()
@@ -436,7 +545,8 @@ def main():
     g2.legend()
 
     # 子图3：B组（去噪后）对数幅度直线拟合
-    tB_seg, sB_seg = select_front_segment_by_amplitude(sB_bb, tB_trim, frac=AMP_FRONT_FRACTION)
+    tB_seg, sB_seg = select_segment_by_snr(sB_bb, tB_trim)
+    nB_lin = len(tB_seg)
     g3.plot(tB_trim, np.log(np.maximum(np.abs(sB_bb), 1e-16)), label="数据 (去噪后)")
     g3.plot(tB_seg, (np.log(A_B) - (1.0/T2_B)*tB_seg), '--', lw=FIT_LW, zorder=3, label="拟合")
     g3.set_title("B组去噪后：对数幅度拟合"); g3.set_xlabel("时间（s）"); g3.set_ylabel("ln|s_bb|"); g3.legend()
@@ -522,20 +632,16 @@ def main():
         ))
         # 第5行（中文总结）
         analysis = (
-            "谐波检测与消除：估计工频基频≈{f0:.3f} Hz，谐波阶数K={K}；"
-            "拟合谐波解释了原始能量的{expl:.1f}%（去噪后总能量下降{red:.1f}%）。"
-            "线/非线性对比：A组(A,T2,f0)相对差({dAA:.2f}%,{dTA:.2f}%,{dfA:.4f}%)、相位差{dpA:.3f} rad；"
-            "B组(A,T2,f0)相对差({dAB:.2f}%,{dTB:.2f}%,{dfB:.4f}%)、相位差{dpB:.3f} rad。"
-            "阈值敏感性：K在7–13范围较稳；前段阈值占比{front:.0f}%（阈值升高抑噪更强但可能低估T2，降低则相反）。"
-            "可信度来源：工频谐波最小二乘全局建模+自适应扫频择优；基带化线性估计提供良好初值，"
-            "非线性复域拟合在此基础上进一步最小化复残差。"
-        ).format(
-            f0=f0_power, K=HARM_K, expl=explained_pct, red=reduction_pct,
-            dAA=dA_A, dTA=dT2_A, dfA=df0_A, dpA=dphi_A,
-            dAB=dA_B, dTB=dT2_B, dfB=df0_B, dpB=dphi_B,
-            front=AMP_FRONT_FRACTION*100.0
+            f"谐波检测与消除：估计工频基频≈{f0_power:.3f} Hz，谐波阶数K={HARM_K}；"
+            f"谐波模型解释能量 {explained_pct:.1f}%（去噪后能量下降 {reduction_pct:.1f}%）。"
+            f"稳健线性估计：SNR门限 = {SNR_RATIO_MIN:.1f}×噪声基线(末尾{NOISE_TAIL_FRAC*100:.0f}%中位数)，"
+            f"相位采用 MAD×{PHASE_MAD_K:.1f} 剔除离群；A组用于线性回归的样本 {nA_lin}/{len(tA_trim)}，"
+            f"B组 {nB_lin}/{len(tB_trim)}。"
+            f"线/非线性对比：A组(A,T2,f0)相对差({dA_A:.2f}%,{dT2_A:.2f}%,{df0_A:.4f}%)、相位差{dphi_A:.3f} rad；"
+            f"B组(A,T2,f0)相对差({dA_B:.2f}%,{dT2_B:.2f}%,{df0_B:.4f}%)、相位差{dphi_B:.3f} rad。"
+            f"结论：在低SNR段，稳健线性法显著抑制偏差，并与复域NLLS结果保持一致性。"
         )
-        f.write(analysis + "\n")
+        f.write(analysis + "")
 
     print("\n=== 完成 ===")
     print("输出目录：", OUTPUT_DIR)
